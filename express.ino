@@ -113,6 +113,20 @@ namespace {
     uint32_t       _eventsUsec{};
     float          _rainbow{};
     V2MIDI::Packet _midi;
+    
+    // Threshold parameters (hardcoded)
+    static constexpr float THRESHOLD_VALUE = 0.5f;  // Threshold for note on/off
+    static constexpr uint8_t THRESHOLD_VELOCITY = 100; // Note velocity
+    
+    // White key notes for 16 channels (C4, D4, E4, F4, G4, A4, B4, C5, D5, E5, F5, G5, A5, B5, C6, D6)
+    static constexpr uint8_t WHITE_KEY_NOTES[Ports.count] = {
+      60, 62, 64, 65, 67, 69, 71,  // C4, D4, E4, F4, G4, A4, B4
+      72, 74, 76, 77, 79, 81, 83,  // C5, D5, E5, F5, G5, A5, B5  
+      84, 86                        // C6, D6
+    };
+    
+    // State tracking for threshold detection
+    bool _noteStates[Ports.count]{};  // Track which ports have notes on
 
     void handleReset() override {
       LED.reset();
@@ -121,6 +135,7 @@ namespace {
         p.reset();
 
       memset(_steps, 0, sizeof(_steps));
+      memset(_noteStates, 0, sizeof(_noteStates));  // Reset note states
       _measureUsec = 0;
       _eventsUsec  = V2Base::getUsec();
       _rainbow     = 0;
@@ -128,6 +143,13 @@ namespace {
     }
 
     void allNotesOff() {
+      // Turn off all notes before sending events
+      for (uint8_t i{}; i < Ports.count; i++) {
+        if (_noteStates[i]) {
+          send(_midi.setNote(config.ports[i].channel, WHITE_KEY_NOTES[i], 0));
+          _noteStates[i] = false;
+        }
+      }
       sendEvents(true);
     }
 
@@ -173,6 +195,20 @@ namespace {
         LED.setBrightness(i, (float)_potis[i].getFraction());
         send(_midi.setControlChange(config.ports[i].channel, config.ports[i].controller, _potis[i].getStep()));
         _steps[i] = _potis[i].getStep();
+        
+        // Check threshold for note on/off
+        float currentValue = _potis[i].getFraction();
+        bool aboveThreshold = currentValue >= THRESHOLD_VALUE;
+        
+        if (aboveThreshold && !_noteStates[i]) {
+          // Note On: threshold crossed from below
+          send(_midi.setNote(config.ports[i].channel, WHITE_KEY_NOTES[i], THRESHOLD_VELOCITY));
+          _noteStates[i] = true;
+        } else if (!aboveThreshold && _noteStates[i]) {
+          // Note Off: threshold crossed from above
+          send(_midi.setNote(config.ports[i].channel, WHITE_KEY_NOTES[i], 0));
+          _noteStates[i] = false;
+        }
       }
     }
 
