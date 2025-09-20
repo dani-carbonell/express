@@ -47,6 +47,9 @@ namespace {
           float min{};
           float max{1};
         } range;
+        
+        float threshold{0.5f};  // Threshold value for note triggering
+        uint8_t note{60};       // MIDI note number
       } ports[Ports.count];
     } config{.ports{
       {.controller{V2MIDI::CC::GeneralPurpose1 + 0}},
@@ -148,6 +151,8 @@ namespace {
         if (_noteStates[i]) {
           send(_midi.setNote(config.ports[i].channel, WHITE_KEY_NOTES[i], 0));
           _noteStates[i] = false;
+          // Reset LED to white based on current potentiometer value
+          LED.setBrightness(i, (float)_potis[i].getFraction());
         }
       }
       sendEvents(true);
@@ -192,23 +197,32 @@ namespace {
         if (!force && _steps[i] == _potis[i].getStep())
           continue;
 
+        // Set LED brightness based on potentiometer value
         LED.setBrightness(i, (float)_potis[i].getFraction());
-        send(_midi.setControlChange(config.ports[i].channel, config.ports[i].controller, _potis[i].getStep()));
-        _steps[i] = _potis[i].getStep();
         
-        // Check threshold for note on/off
+        // Add red color when note is playing (above threshold)
         float currentValue = _potis[i].getFraction();
-        bool aboveThreshold = currentValue >= THRESHOLD_VALUE;
+        bool aboveThreshold = currentValue >= config.ports[i].threshold;
         
         if (aboveThreshold && !_noteStates[i]) {
           // Note On: threshold crossed from below
           send(_midi.setNote(config.ports[i].channel, WHITE_KEY_NOTES[i], THRESHOLD_VELOCITY));
           _noteStates[i] = true;
+          // Set LED to red when note starts playing
+          LED.setHSV(i, 0, 1, 1); // Red color
         } else if (!aboveThreshold && _noteStates[i]) {
           // Note Off: threshold crossed from above
           send(_midi.setNote(config.ports[i].channel, WHITE_KEY_NOTES[i], 0));
           _noteStates[i] = false;
+          // Reset LED to white based on potentiometer value
+          LED.setBrightness(i, currentValue);
+        } else if (_noteStates[i]) {
+          // Note is still playing, keep red color
+          LED.setHSV(i, 0, 1, 1); // Red color
         }
+        
+        send(_midi.setControlChange(config.ports[i].channel, config.ports[i].controller, _potis[i].getStep()));
+        _steps[i] = _potis[i].getStep();
       }
     }
 
@@ -241,6 +255,7 @@ namespace {
       reset();
     }
 
+
     void exportSettings(JsonArray json) override {
       for (uint8_t i{}; i < Ports.count; i++) {
         {
@@ -267,6 +282,15 @@ namespace {
           setting["label"] = "Controller";
           char path[64];
           sprintf(path, "ports[%d]/controller", i);
+          setting["path"] = path;
+        }
+        {
+          JsonObject setting{json.add<JsonObject>()};
+          setting["type"]  = "note";
+          setting["label"] = "Note";
+
+          char path[64];
+          sprintf(path, "ports[%d]/note", i);
           setting["path"] = path;
         }
         {
@@ -299,6 +323,19 @@ namespace {
           setting["step"]  = 0.01;
           char path[64];
           sprintf(path, "ports[%d]/range/max", i);
+          setting["path"] = path;
+        }
+        {
+          JsonObject setting{json.add<JsonObject>()};
+          setting["ruler"] = true;
+          setting["type"]  = "number";
+          setting["label"] = "Threshold";
+          setting["text"]  = "Trigger Level";
+          setting["min"]   = 0;
+          setting["max"]   = 1;
+          setting["step"]  = 0.01;
+          char path[64];
+          sprintf(path, "ports[%d]/threshold", i);
           setting["path"] = path;
         }
       }
@@ -353,6 +390,24 @@ namespace {
                 config.ports[i].range.min = 0;
             }
           }
+
+          if (!jsonPort["threshold"].isNull()) {
+            float value{jsonPort["threshold"]};
+            if (value < 0.f || value > 1.f)
+              value = 0.5f;
+
+            config.ports[i].threshold = value;
+          }
+
+          if (!jsonPort["note"].isNull()) {
+            uint8_t value{jsonPort["note"]};
+            if (value > 127)
+              value = 60;
+
+            config.ports[i].note = value;
+          }
+
+
         }
       }
     }
@@ -370,6 +425,10 @@ namespace {
           jsonPort["#controller"] = "The controller number";
         jsonPort["controller"] = config.ports[i].controller;
 
+        if (i == 0)
+          jsonPort["#note"] = "The MIDI note number to play when triggered (0 .. 127)";
+        jsonPort["note"] = config.ports[i].note;
+
         {
           JsonObject jsonRange = jsonPort["range"].to<JsonObject>();
           if (i == 0)
@@ -384,6 +443,11 @@ namespace {
             jsonRange["#max"] = "The maximum / 127 position (0 .. 1)";
           jsonRange["max"] = serialized(String(config.ports[i].range.max, 2));
         }
+
+        if (i == 0)
+          jsonPort["#threshold"] = "The threshold level to trigger notes (0 .. 1)";
+        jsonPort["threshold"] = serialized(String(config.ports[i].threshold, 2));
+
       }
     }
 
