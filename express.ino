@@ -7,16 +7,17 @@
 #include <V2MIDI.h>
 #include <V2Potentiometer.h>
 
-V2DEVICE_METADATA("com.versioduo.express", 23, "versioduo:samd:express");
+V2DEVICE_METADATA("com.versioduo.express", 24, "versioduo:samd:express");
 
 namespace {
   constexpr struct {
     uint8_t count{16};
   } Ports;
 
-  V2LED::WS2812        LED(Ports.count, PIN_LED_WS2812, &sercom2, SPI_PAD_0_SCK_1, PIO_SERCOM);
-  V2MIDI::SerialDevice MIDISerial(&SerialMIDI);
-  V2Base::Analog::ADC  ADC[]{0, 1};
+  V2LED::WS2812       LED(Ports.count, PIN_LED_WS2812, &sercom2, SPI_PAD_0_SCK_1, PIO_SERCOM);
+  V2Link::Port        Plug(&SerialPlug, PIN_SERIAL_PLUG_TX_ENABLE);
+  V2Link::Port        Socket(&SerialSocket, PIN_SERIAL_SOCKET_TX_ENABLE);
+  V2Base::Analog::ADC ADC[]{0, 1};
 
   class Device : public V2Device {
   public:
@@ -85,8 +86,12 @@ namespace {
     }
 
   private:
-    const struct V2Potentiometer::Config _config {
-      .nSteps{128}, .min{0.05}, .max{0.9}, .alpha{0.3}, .lag{0.02},
+    const struct V2Potentiometer::Config _config{
+      .nSteps{128},
+      .min{0.05},
+      .max{0.9},
+      .alpha{0.3},
+      .lag{0.02},
     };
 
     V2Potentiometer _potis[Ports.count]{
@@ -379,19 +384,59 @@ namespace {
     }
   } Device;
 
-  // Dispatch MIDI packets
+  // Dispatch MIDI packets.
   class MIDI {
   public:
     void loop() {
       if (!Device.usb.midi.receive(&_midi))
         return;
 
-      Device.dispatch(&Device.usb.midi, &_midi);
+      if (_midi.getPort() == 0) {
+        Device.dispatch(&Device.usb.midi, &_midi);
+
+      } else {
+        _midi.setPort(_midi.getPort() - 1);
+        Socket.send(&_midi);
+      }
     }
 
   private:
-    V2MIDI::Packet _midi;
+    V2MIDI::Packet _midi{};
   } MIDI;
+
+  // Dispatch Link packets.
+  class Link : public V2Link {
+  public:
+    Link() : V2Link(&Plug, &Socket) {
+      Device.link = this;
+    }
+
+  private:
+    V2MIDI::Packet _midi{};
+
+    // Receive a host event from our parent device.
+    void receivePlug(V2Link::Packet* packet) override {
+      if (packet->getType() == V2Link::Packet::Type::MIDI) {
+        packet->receive(&_midi);
+        Device.dispatch(&Plug, &_midi);
+      }
+    }
+
+    // Forward children device events to the host.
+    void receiveSocket(V2Link::Packet* packet) override {
+      if (packet->getType() == V2Link::Packet::Type::MIDI) {
+        uint8_t address = packet->getAddress();
+        if (address == 0x0f)
+          return;
+
+        if (Device.usb.midi.connected()) {
+          packet->receive(&_midi);
+          _midi.setPort(address + 1);
+          Device.usb.midi.send(&_midi);
+        }
+      }
+    }
+  } Link;
 }
 
 void setup() {
@@ -399,6 +444,15 @@ void setup() {
 
   LED.begin();
   LED.setMaxBrightness(0.5);
+
+  Plug.begin();
+  Socket.begin();
+  Device.link = &Link;
+
+  // Set the SERCOM interrupt priority, it requires a stable ~300 kHz interrupt
+  // frequency. This needs to be after begin().
+  setSerialPriority(&SerialPlug, 2);
+  setSerialPriority(&SerialSocket, 2);
 
   for (uint8_t i{}; i < V2Base::countof(ADC); i++)
     ADC[i].begin();
@@ -416,6 +470,7 @@ void setup() {
 void loop() {
   LED.loop();
   MIDI.loop();
+  Link.loop();
   Device.loop();
 
   if (Device.idle())
